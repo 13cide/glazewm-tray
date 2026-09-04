@@ -16,25 +16,22 @@ from .win32 import (
 
 
 class FloatingBar:
-    """A borderless always-on-top tkinter window showing workspace info."""
+    """A borderless always-on-top tkinter window showing workspace info for a specific monitor."""
 
     BAR_HEIGHT = 32
     ICON_SIZE = 16
     PADDING = 6
-
-    # Color key for transparent mode — a green nobody uses in the UI
     _TRANSPARENT_KEY = '#01fe01'
 
-    def __init__(self, app):
+    def __init__(self, app, monitor_data, tk_root):
         self.app = app
-        self.root = tk.Tk()
-        self.root.withdraw()  # Hide root window
-
-        self.bar = tk.Toplevel(self.root)
-        self.bar.overrideredirect(True)  # Borderless
+        self.monitor_data = monitor_data
+        self.tk_root = tk_root
+        
+        self.bar = tk.Toplevel(self.tk_root)
+        self.bar.overrideredirect(True)
         self.bar.attributes('-topmost', True)
 
-        # Load persisted settings (override config.py defaults)
         _s = _settings.load()
         self._transparent = _s['transparent']
         self._position_right = _s['position_right']
@@ -42,6 +39,7 @@ class FloatingBar:
         self._label_left = _s['label_left']
         self._workspace_gap = _s['workspace_gap']
         self._widget_bg = self._rgb(config.COLORS["bg"])
+        
         if self._transparent:
             self._bg_hex = self._TRANSPARENT_KEY
             self.bar.configure(bg=self._TRANSPARENT_KEY)
@@ -50,69 +48,96 @@ class FloatingBar:
             self._bg_hex = self._widget_bg
             self.bar.configure(bg=self._bg_hex)
 
-        # Container frame — uses transparent key in transparent mode
         self.frame = tk.Frame(self.bar, bg=self._bg_hex)
         self.frame.pack(fill=tk.BOTH, expand=True, padx=2, pady=2)
 
-        # Keep references to PhotoImages so they're not garbage collected
         self._photo_refs = []
-
-        # Right-click context menu (disabled — kept for future use)
         self._context_menu = self._build_context_menu()
-
-        # Fullscreen tracking
-        self._manually_hidden = _s['bar_hidden']  # True when toggled off via tray menu
+        self._manually_hidden = _s['bar_hidden']
         self._bar_hidden = self._manually_hidden
 
-        # Position bar bottom-right, above taskbar
         self._position_bar()
-
-        # Apply Win32 flags after window is mapped
         self.bar.after(100, self._apply_win32_flags)
-
-        # If bar was hidden when last closed, withdraw it after flags are set
+        
         if self._manually_hidden:
             self.bar.after(150, self.bar.withdraw)
 
-        # Start fullscreen check loop (every 2 seconds)
         self._check_fullscreen()
 
     @staticmethod
     def _rgb(color_tuple):
-        """Convert (r, g, b) to tkinter hex color."""
         return f'#{color_tuple[0]:02x}{color_tuple[1]:02x}{color_tuple[2]:02x}'
 
     def _position_bar(self, width=300):
-        """Position bar on the taskbar (right side near tray, or left side)."""
         user32 = ctypes.windll.user32
+        taskbars = []
 
-        taskbar_hwnd = user32.FindWindowW("Shell_TrayWnd", None)
-        if not taskbar_hwnd:
-            screen_w = self.root.winfo_screenwidth()
-            screen_h = self.root.winfo_screenheight()
+        def callback(hwnd, _):
+            if user32.IsWindowVisible(hwnd):
+                buf = ctypes.create_unicode_buffer(256)
+                user32.GetClassNameW(hwnd, buf, 256)
+                name = buf.value
+                if name in ('Shell_TrayWnd', 'Shell_SecondaryTrayWnd'):
+                    rect = wintypes.RECT()
+                    if user32.GetWindowRect(hwnd, ctypes.byref(rect)):
+                        taskbars.append({
+                            'hwnd': hwnd,
+                            'class': name,
+                            'rect': (rect.left, rect.top, rect.right, rect.bottom)
+                        })
+            return True
+
+        CMPFUNC = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
+        user32.EnumWindows(CMPFUNC(callback), 0)
+
+        mon_x = self.monitor_data.get('x', 0)
+        mon_y = self.monitor_data.get('y', 0)
+        mon_w = self.monitor_data.get('width', 1920)
+        mon_h = self.monitor_data.get('height', 1080)
+
+        target_taskbar = None
+        for tb in taskbars:
+            left, top, right, bottom = tb['rect']
+            cx = left + (right - left) // 2
+            cy = top + (bottom - top) // 2
+            if mon_x <= cx <= mon_x + mon_w and mon_y <= cy <= mon_y + mon_h:
+                target_taskbar = tb
+                break
+
+        if not target_taskbar:
+            screen_w = self.tk_root.winfo_screenwidth()
+            screen_h = self.tk_root.winfo_screenheight()
             self.bar.geometry(f'{width}x{self.BAR_HEIGHT}+{screen_w - width - 8}+{screen_h - self.BAR_HEIGHT}')
             return
 
-        taskbar_rect = wintypes.RECT()
-        user32.GetWindowRect(taskbar_hwnd, ctypes.byref(taskbar_rect))
+        taskbar_rect = target_taskbar['rect']
+        taskbar_hwnd = target_taskbar['hwnd']
 
         if self._position_right:
-            tray_hwnd = user32.FindWindowExW(taskbar_hwnd, None, "TrayNotifyWnd", None)
-            if tray_hwnd:
-                tray_rect = wintypes.RECT()
-                user32.GetWindowRect(tray_hwnd, ctypes.byref(tray_rect))
-                x = tray_rect.left - width - 4
+            if target_taskbar['class'] == 'Shell_TrayWnd':
+                tray_hwnd = user32.FindWindowExW(taskbar_hwnd, None, "TrayNotifyWnd", None)
+                if tray_hwnd:
+                    tray_rect = wintypes.RECT()
+                    user32.GetWindowRect(tray_hwnd, ctypes.byref(tray_rect))
+                    x = tray_rect.left - width - 4
+                else:
+                    x = taskbar_rect[2] - width - 200
             else:
-                x = taskbar_rect.right - width - 200
+                clock_hwnd = user32.FindWindowExW(taskbar_hwnd, None, "TrayClockWClass", None)
+                if clock_hwnd:
+                    clock_rect = wintypes.RECT()
+                    user32.GetWindowRect(clock_hwnd, ctypes.byref(clock_rect))
+                    x = clock_rect.left - width - 4
+                else:
+                    x = taskbar_rect[2] - width - 120
         else:
-            x = taskbar_rect.left + 4
+            x = taskbar_rect[0] + 4
 
-        taskbar_h = taskbar_rect.bottom - taskbar_rect.top
-        y = taskbar_rect.top + (taskbar_h - self.BAR_HEIGHT) // 2
+        taskbar_h = taskbar_rect[3] - taskbar_rect[1]
+        y = taskbar_rect[1] + (taskbar_h - self.BAR_HEIGHT) // 2
         self.bar.geometry(f'{width}x{self.BAR_HEIGHT}+{x}+{y}')
 
     def _apply_win32_flags(self):
-        """Set WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW on the bar window."""
         hwnd = int(self.bar.wm_frame(), 16) if self.bar.wm_frame() else None
         if not hwnd:
             hwnd = self.bar.winfo_id()
@@ -125,11 +150,9 @@ class FloatingBar:
             print(f"Failed to set bar Win32 flags: {e}")
 
     def _run_cmd_async(self, cmd):
-        """Run a GlazeWM command in a background thread to avoid blocking tk."""
         threading.Thread(target=self.app.run_cmd, args=(cmd,), daemon=True).start()
 
     def _focus_workspace(self, name):
-        """Focus workspace and restore any minimized windows on it."""
         with self.app._lock:
             processes = set()
             for ws in self.app.all_workspaces:
@@ -151,7 +174,6 @@ class FloatingBar:
         threading.Thread(target=_do, daemon=True).start()
 
     def _build_context_menu(self):
-        """Build right-click context menu matching pystray menu."""
         menu = tk.Menu(self.bar, tearoff=0,
                        bg=self._rgb(config.COLORS["bg"]),
                        fg=self._rgb(config.COLORS["text"]),
@@ -171,18 +193,9 @@ class FloatingBar:
         self._context_menu.tk_popup(event.x_root, event.y_root, 0)
 
     def _on_exit(self):
-        self.app.running = False
-        self.app._event.set()
-        for ws in [self.app._ws_sub, self.app._ws_cmd]:
-            if ws:
-                try:
-                    ws.close()
-                except:
-                    pass
-        self.root.destroy()
+        self.app.on_exit()
 
     def update_bar(self):
-        """Rebuild the bar contents from current workspace data."""
         if self._bar_hidden:
             return
 
@@ -197,7 +210,10 @@ class FloatingBar:
         self._photo_refs.clear()
 
         with self.app._lock:
-            workspaces = list(self.app.all_workspaces)
+            monitor_data = next((m for m in self.app.all_monitors if m['id'] == self.monitor_data['id']), None)
+            if monitor_data:
+                self.monitor_data = monitor_data
+            workspaces = self.monitor_data.get('workspaces', [])
 
         if not workspaces:
             lbl = tk.Label(self.frame, text="?" if self.app.error_count <= 3 else "!",
@@ -228,7 +244,6 @@ class FloatingBar:
             num_label.bind('<Button-1>', lambda e, n=name: self._focus_workspace(n))
             total_width += 28
 
-            # Build icon frames first (without packing yet)
             win_frames = []
             for win in windows:
                 process = win.get('process', '')
@@ -266,7 +281,6 @@ class FloatingBar:
                     w.bind('<Button-1>', lambda e, n=name: self._focus_workspace(n))
                 win_frames.append(win_frame)
 
-            # Pack number label and icon frames in configured order
             if self._label_left:
                 num_label.pack(side=tk.LEFT, padx=(2, 1))
                 for wf in win_frames:
@@ -281,7 +295,6 @@ class FloatingBar:
         self._position_bar(total_width)
 
     def _check_fullscreen(self):
-        """Periodically check if a fullscreen app is active and hide/show bar."""
         try:
             if self._manually_hidden:
                 pass
@@ -297,34 +310,25 @@ class FloatingBar:
                     self.update_bar()
         except Exception:
             pass
-        self.root.after(1000, self._check_fullscreen)
+        self.tk_root.after(1000, self._check_fullscreen)
 
     def toggle_icons_only(self):
-        """Switch between icons+text and icons-only mode."""
         self._icons_only = not self._icons_only
         self.update_bar()
-        self.app._save_settings()
 
     def toggle_position(self):
-        """Switch between right side (near tray) and left side of taskbar."""
         self._position_right = not self._position_right
         self.update_bar()
-        self.app._save_settings()
 
     def toggle_label_side(self):
-        """Switch workspace number between left and right of its icons."""
         self._label_left = not self._label_left
         self.update_bar()
-        self.app._save_settings()
 
     def toggle_workspace_gap(self):
-        """Switch between compact (3px) and wide (12px) spacing between workspaces."""
         self._workspace_gap = 12 if self._workspace_gap <= 3 else 3
         self.update_bar()
-        self.app._save_settings()
 
     def toggle_background(self):
-        """Switch between transparent and dark background."""
         self._transparent = not self._transparent
         if self._transparent:
             self._bg_hex = self._TRANSPARENT_KEY
@@ -336,16 +340,15 @@ class FloatingBar:
             self.bar.attributes('-transparentcolor', '')
         self.frame.configure(bg=self._bg_hex)
         self.update_bar()
-        self.app._save_settings()
 
     def schedule_update(self):
-        """Thread-safe: schedule a bar update on the tk mainloop."""
         try:
-            self.root.after_idle(self.update_bar)
+            self.tk_root.after_idle(self.update_bar)
         except tk.TclError:
             pass
-
-    def run(self):
-        """Start the tkinter mainloop."""
-        self.update_bar()
-        self.root.mainloop()
+            
+    def destroy(self):
+        try:
+            self.bar.destroy()
+        except Exception:
+            pass
