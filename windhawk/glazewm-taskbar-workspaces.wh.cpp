@@ -1175,15 +1175,20 @@ static void PaintWidget(HWND hwnd) {
             /* int startX = x + 4; */
             int endX = startX;
 
+            int iconStartX = 0, iconEndX = 0;
             if (g_settings.labelLeft) {
                 drawNumber(endX);
                 if (!ws->windows.empty()) {
                     FillRoundRectAlpha(bits, W, H, endX + 4 + numSize.cx + 5, (H - 12) / 2, 1, 12, 0, g_settings.textColor, 80);
                 }
                 endX += numW;
+                iconStartX = endX;
                 endX = drawIcons(endX);
+                iconEndX = endX;
             } else {
+                iconStartX = endX;
                 endX = drawIcons(endX);
+                iconEndX = endX;
                 if (!ws->windows.empty()) {
                     FillRoundRectAlpha(bits, W, H, endX + 4, (H - 12) / 2, 1, 12, 0, g_settings.textColor, 80);
                     endX += 8; // Extra padding for the divider
@@ -1198,7 +1203,15 @@ static void PaintWidget(HWND hwnd) {
             if (ws->focused || ws->hasWindows) {
                 int pillW = ws->focused ? 16 : 6;
                 int pillH = 3;
-                int pillX = startX + (itemWidth - pillW) / 2;
+                
+                int targetCenter;
+                if (!ws->windows.empty()) {
+                    targetCenter = (iconStartX + iconEndX) / 2 - 2;
+                } else {
+                    targetCenter = startX + itemWidth / 2;
+                }
+                
+                int pillX = targetCenter - (pillW / 2);
                 int pillY = H - pillH - 1; // 1px from bottom
 
                 COLORREF pillCol = ws->focused ? g_settings.activeColor : RGB(150, 150, 150);
