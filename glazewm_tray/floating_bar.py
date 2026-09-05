@@ -152,26 +152,39 @@ class FloatingBar:
     def _run_cmd_async(self, cmd):
         threading.Thread(target=self.app.run_cmd, args=(cmd,), daemon=True).start()
 
+    def _toggle_window(self, win_id, win_handle, is_focused, display_state, window_state, workspace_name):
+        print(f"[TOGGLE] win_id={win_id[:8] if win_id else '?'}... focused={is_focused} winState={window_state} ws={workspace_name}")
+        if window_state == 'minimized':
+            # Window is minimized in GlazeWM -> restore it
+            # GlazeWM's toggle-minimized properly restores a window to its
+            # previous state (tiling/floating) and its saved position.
+            # focus --container-id does NOT restore minimized windows.
+            def _do_restore():
+                import time
+                # Focus workspace first (handles cross-monitor scenarios)
+                self.app.run_cmd(f"focus --workspace {workspace_name}")
+                time.sleep(0.05)  # Reverted back to 0.05s as the race condition theory was wrong
+                # toggle-minimized restores to previous state
+                self.app.run_cmd(f"--id {win_id} toggle-minimized")
+                print(f"[TOGGLE] -> restored via toggle-minimized")
+            threading.Thread(target=_do_restore, daemon=True).start()
+        elif is_focused:
+            # Window is currently visible and focused -> minimize it
+            print(f"[TOGGLE] -> minimizing")
+            self._run_cmd_async("set-minimized")
+        else:
+            # Window is visible (tiling/floating) but not focused -> just focus it
+            def _do_focus():
+                import time
+                self.app.run_cmd(f"focus --workspace {workspace_name}")
+                time.sleep(0.05)
+                if win_id:
+                    self.app.run_cmd(f"focus --container-id {win_id}")
+                print(f"[TOGGLE] -> focused via focus --container-id")
+            threading.Thread(target=_do_focus, daemon=True).start()
+
     def _focus_workspace(self, name):
-        with self.app._lock:
-            processes = set()
-            for ws in self.app.all_workspaces:
-                if ws['name'] == name:
-                    for win in ws.get('windows', []):
-                        p = win.get('process', '')
-                        if p:
-                            processes.add(p.lower())
-                    break
-
-        def _do():
-            self.app.run_cmd(f"focus --workspace {name}")
-            if not processes:
-                return
-            import time
-            time.sleep(0.1)
-            restore_minimized_by_process(processes)
-
-        threading.Thread(target=_do, daemon=True).start()
+        self._run_cmd_async(f"focus --workspace {name}")
 
     def _build_context_menu(self):
         menu = tk.Menu(self.bar, tearoff=0,
@@ -248,6 +261,11 @@ class FloatingBar:
             for win in windows:
                 process = win.get('process', '')
                 title = win.get('title', '') or process or '?'
+                win_id = win.get('id', '')
+                win_handle = win.get('handle', 0)
+                win_has_focus = win.get('hasFocus', False)
+                win_display_state = win.get('displayState', 'shown')
+                win_window_state = win.get('windowState', 'tiling')
 
                 win_frame = tk.Frame(self.frame, bg=self._widget_bg, cursor="hand2")
 
@@ -268,6 +286,8 @@ class FloatingBar:
                             display = display[:-len(suffix)]
                             break
                     short_name = display[:12] if display else '?'
+                    # Show focused text slightly differently (e.g. brighter) or just standard?
+                    # Keep it standard to match old behavior
                     name_lbl = tk.Label(win_frame, text=short_name, font=("Arial", 7),
                                         fg=self._rgb(config.COLORS["text"]),
                                         bg=self._widget_bg)
@@ -278,7 +298,7 @@ class FloatingBar:
                     total_width += self.ICON_SIZE + 4
 
                 for w in click_targets:
-                    w.bind('<Button-1>', lambda e, n=name: self._focus_workspace(n))
+                    w.bind('<Button-1>', lambda e, wid=win_id, h=win_handle, foc=win_has_focus, ds=win_display_state, ws_=win_window_state, wn=name: self._toggle_window(wid, h, foc, ds, ws_, wn))
                 win_frames.append(win_frame)
 
             if self._label_left:

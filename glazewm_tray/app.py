@@ -99,7 +99,14 @@ class GlazeTrayApp:
                 wins = []
                 if isinstance(node, dict):
                     if node.get('type') == 'window':
+                        state_obj = node.get('state', {})
+                        win_state = state_obj.get('type', 'tiling') if isinstance(state_obj, dict) else 'tiling'
                         wins.append({
+                            "id": node.get('id', ''),
+                            "handle": node.get('handle', 0),
+                            "hasFocus": node.get('hasFocus', False),
+                            "displayState": node.get('displayState', 'shown'),
+                            "windowState": win_state,
                             "title": node.get('title', ''),
                             "process": node.get('processName', '')
                         })
@@ -273,7 +280,7 @@ class GlazeTrayApp:
                         (m['id'], m['name'], m['x'], m['y'], m['width'], m['height'],
                          tuple(
                             (ws['name'], ws['focused'], ws['resident'],
-                             tuple(w.get('title', '') for w in ws.get('windows', [])))
+                             tuple((w.get('id', ''), w.get('handle', 0), w.get('hasFocus', False), w.get('displayState', 'shown'), w.get('windowState', 'tiling'), w.get('title', '')) for w in ws.get('windows', [])))
                             for ws in m.get('workspaces', [])
                          ))
                         for m in self.all_monitors
