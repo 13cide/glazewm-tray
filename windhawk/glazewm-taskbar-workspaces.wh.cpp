@@ -68,9 +68,6 @@ icons directly on the Windows taskbar.
 - debounceMs: 300
   $name: Debounce Delay (ms)
   $description: Milliseconds to wait after burst events (window open/close) before refreshing
-- barHeight: 32
-  $name: Bar Height (px)
-  $description: Height of the workspace bar in pixels
 - bgColor: "#141414"
   $name: Background Color
   $description: Background color when not transparent (hex RGB)
@@ -232,7 +229,7 @@ struct Settings {
     bool  labelLeft    = true;
     int   workspaceGap = 3;
     int   debounceMs   = 300;
-    int   barHeight    = 32;
+    
     COLORREF bgColor      = RGB(20, 20, 20);
     COLORREF textColor    = RGB(255, 255, 255);
     COLORREF activeColor  = RGB(66, 192, 251);
@@ -746,8 +743,8 @@ static void LoadSettings() {
     g_settings.labelLeft    = Wh_GetIntSetting(L"labelLeft");
     g_settings.workspaceGap = Wh_GetIntSetting(L"workspaceGap");
     g_settings.debounceMs   = Wh_GetIntSetting(L"debounceMs");
-    g_settings.barHeight    = Wh_GetIntSetting(L"barHeight");
-    if (g_settings.barHeight < 16) g_settings.barHeight = 32;
+    
+    
     if (g_settings.debounceMs < 50) g_settings.debounceMs = 300;
 
     auto loadColor = [](const wchar_t* name, COLORREF def) -> COLORREF {
@@ -908,7 +905,7 @@ static void PositionWidget(HWND hwnd, int contentWidth) {
         x = taskbarRect.left + 4;
     }
 
-    MoveWindow(hwnd, x, taskbarRect.top, width, g_settings.barHeight, TRUE);
+    MoveWindow(hwnd, x, taskbarRect.top, width, taskbarRect.bottom - taskbarRect.top, TRUE);
 }
 
 // =====================================================================
@@ -1269,6 +1266,10 @@ static LRESULT CALLBACK WidgetWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM
                     for (auto w : g_widgets) PostMessage(w, WM_GLAZE_REFRESH, 0, 0);
             }).detach();
         } else if (wParam == TIMER_FULLSCREEN) {
+            for (auto w : g_widgets) {
+                RECT cr; GetClientRect(w, &cr);
+                PositionWidget(w, cr.right);
+            }
             if (IsFullscreenActive()) {
                 if (!g_barHidden) {
                     ShowWindow(hwnd, SW_HIDE);
@@ -1332,7 +1333,7 @@ static void UIThreadProc() {
         if (wcscmp(className, L"Shell_TrayWnd") == 0 || wcscmp(className, L"Shell_SecondaryTrayWnd") == 0) {
             DWORD exStyle = WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE | WS_EX_TOPMOST | WS_EX_LAYERED;
             HWND widget = CreateWindowExW(exStyle, WIDGET_CLASS, L"GlazeWM Workspaces",
-                                     WS_POPUP, 0, 0, 300, g_settings.barHeight,
+                                     WS_POPUP, 0, 0, 300, 32,
                                      nullptr, nullptr, GetModuleHandle(nullptr), nullptr);
             if (widget) {
                 if (g_settings.transparent) {
