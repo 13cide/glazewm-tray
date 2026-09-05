@@ -111,7 +111,8 @@ class FloatingBar:
             return
 
         taskbar_rect = target_taskbar['rect']
-        taskbar_hwnd = target_taskbar['hwnd']
+        self.taskbar_hwnd = target_taskbar['hwnd']
+        taskbar_hwnd = self.taskbar_hwnd
 
         if self._position_right:
             if target_taskbar['class'] == 'Shell_TrayWnd':
@@ -148,6 +149,12 @@ class FloatingBar:
             style = ctypes.windll.user32.GetWindowLongW(hwnd, GWL_EXSTYLE)
             new_style = style | WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW
             ctypes.windll.user32.SetWindowLongW(hwnd, GWL_EXSTYLE, new_style)
+
+            # Set taskbar as the owner window so it always stays strictly above it
+            if hasattr(self, 'taskbar_hwnd') and self.taskbar_hwnd:
+                GWLP_HWNDPARENT = -8
+                set_window_long = getattr(ctypes.windll.user32, "SetWindowLongPtrW", ctypes.windll.user32.SetWindowLongW)
+                set_window_long(hwnd, GWLP_HWNDPARENT, self.taskbar_hwnd)
         except Exception as e:
             print(f"Failed to set bar Win32 flags: {e}")
 
@@ -215,8 +222,8 @@ class FloatingBar:
             return
 
         try:
-            self.bar.attributes('-topmost', True)
-            self.bar.lift()
+            if not self.bar.attributes('-topmost'):
+                self.bar.attributes('-topmost', True)
         except tk.TclError:
             pass
 
