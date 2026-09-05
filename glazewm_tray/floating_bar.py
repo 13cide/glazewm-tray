@@ -135,7 +135,9 @@ class FloatingBar:
 
         taskbar_h = taskbar_rect[3] - taskbar_rect[1]
         y = taskbar_rect[1] + (taskbar_h - self.BAR_HEIGHT) // 2
-        self.bar.geometry(f'{width}x{self.BAR_HEIGHT}+{x}+{y}')
+        new_geom = f'{width}x{self.BAR_HEIGHT}+{x}+{y}'
+        if self.bar.geometry() != new_geom:
+            self.bar.geometry(new_geom)
 
     def _apply_win32_flags(self):
         hwnd = int(self.bar.wm_frame(), 16) if self.bar.wm_frame() else None
@@ -218,9 +220,8 @@ class FloatingBar:
         except tk.TclError:
             pass
 
-        for widget in self.frame.winfo_children():
-            widget.destroy()
-        self._photo_refs.clear()
+        new_frame = tk.Frame(self.bar, bg=self._bg_hex)
+        new_photo_refs = []
 
         with self.app._lock:
             monitor_data = next((m for m in self.app.all_monitors if m['id'] == self.monitor_data['id']), None)
@@ -229,11 +230,14 @@ class FloatingBar:
             workspaces = self.monitor_data.get('workspaces', [])
 
         if not workspaces:
-            lbl = tk.Label(self.frame, text="?" if self.app.error_count <= 3 else "!",
+            lbl = tk.Label(new_frame, text="?" if self.app.error_count <= 3 else "!",
                            fg=self._rgb(config.COLORS["error"] if self.app.error_count > 3 else config.COLORS["text"]),
                            bg=self._widget_bg,
                            font=("Arial", 12, "bold"))
             lbl.pack(side=tk.LEFT, padx=4)
+            new_frame.pack(fill=tk.BOTH, expand=True, padx=2, pady=2)
+            self.frame.destroy()
+            self.frame = new_frame
             self._position_bar(60)
             return
 
@@ -245,13 +249,13 @@ class FloatingBar:
             windows = ws.get('windows', [])
 
             if i > 0:
-                sep = tk.Frame(self.frame, width=1, bg=self._rgb(config.COLORS["inactive"]))
+                sep = tk.Frame(new_frame, width=1, bg=self._rgb(config.COLORS["inactive"]))
                 sep.pack(side=tk.LEFT, fill=tk.Y, padx=self._workspace_gap, pady=4)
                 total_width += 1 + self._workspace_gap * 2
 
             num_bg = self._rgb(config.COLORS["active"]) if is_focused else self._widget_bg
             num_fg = config.COLORS["text"] if has_windows or is_focused else config.COLORS["inactive"]
-            num_label = tk.Label(self.frame, text=name, font=("Arial", 11, "bold"),
+            num_label = tk.Label(new_frame, text=name, font=("Arial", 11, "bold"),
                                  fg=self._rgb(num_fg), bg=num_bg,
                                  padx=4, pady=0, cursor="hand2")
             num_label.bind('<Button-1>', lambda e, n=name: self._focus_workspace(n))
@@ -267,13 +271,13 @@ class FloatingBar:
                 win_display_state = win.get('displayState', 'shown')
                 win_window_state = win.get('windowState', 'tiling')
 
-                win_frame = tk.Frame(self.frame, bg=self._widget_bg, cursor="hand2")
+                win_frame = tk.Frame(new_frame, bg=self._widget_bg, cursor="hand2")
 
                 icon_img = get_process_icon(process, self.ICON_SIZE)
                 if not icon_img:
                     icon_img = make_fallback_icon(process[:1].upper() if process else '?', self.ICON_SIZE)
                 photo = ImageTk.PhotoImage(icon_img)
-                self._photo_refs.append(photo)
+                new_photo_refs.append(photo)
                 icon_lbl = tk.Label(win_frame, image=photo, bg=self._widget_bg)
                 icon_lbl.pack(side=tk.LEFT)
 
@@ -310,6 +314,11 @@ class FloatingBar:
                     wf.pack(side=tk.LEFT, padx=(2, 0))
                 num_label.pack(side=tk.LEFT, padx=(1, 2))
 
+        new_frame.pack(fill=tk.BOTH, expand=True, padx=2, pady=2)
+        self.frame.destroy()
+        self.frame = new_frame
+        self._photo_refs = new_photo_refs
+
         total_width += self.PADDING
         total_width = max(total_width, 60)
         self._position_bar(total_width)
@@ -323,9 +332,13 @@ class FloatingBar:
                     self.bar.withdraw()
                     self._bar_hidden = True
             else:
-                self.bar.deiconify()
-                self.bar.attributes('-topmost', True)
                 if self._bar_hidden:
+                    self.bar.deiconify()
+                    try:
+                        if not self.bar.attributes('-topmost'):
+                            self.bar.attributes('-topmost', True)
+                    except tk.TclError:
+                        pass
                     self._bar_hidden = False
                     self.update_bar()
         except Exception:
