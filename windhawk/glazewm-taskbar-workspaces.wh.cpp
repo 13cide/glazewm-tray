@@ -7,7 +7,7 @@
 // @github          https://github.com/13cide
 // @include         explorer.exe
 // @architecture    x86-64
-// @compilerOptions -lwinhttp -lshell32 -lgdi32 -lshlwapi
+// @compilerOptions -lwinhttp -lshell32 -lgdi32 -lshlwapi -luxtheme -lmsimg32
 // ==/WindhawkMod==
 
 // ==WindhawkModReadme==
@@ -94,7 +94,9 @@ icons directly on the Windows taskbar.
 #define _WIN32_WINNT 0x0A00
 #endif
 
-#include <windows.h>
+#include <uxtheme.h>
+#include <cmath>
+#include <vssym32.h>
 #include <winhttp.h>
 #include <shellapi.h>
 #include <tlhelp32.h>
@@ -908,9 +910,60 @@ static void PositionWidget(HWND hwnd, int contentWidth) {
     MoveWindow(hwnd, x, taskbarRect.top, width, taskbarRect.bottom - taskbarRect.top, TRUE);
 }
 
-// =====================================================================
-// WIDGET RENDERING (GDI)
-// =====================================================================
+
+static std::string g_hoveredWs = "";
+
+static void FillRoundRectAlpha(void* bits, int W, int H, int rx, int ry, int rw, int rh, int radius, COLORREF col, BYTE a) {
+    if (a == 0) return;
+    BYTE rr = GetRValue(col);
+    BYTE gg = GetGValue(col);
+    BYTE bb = GetBValue(col);
+    rr = (rr * a) / 255;
+    gg = (gg * a) / 255;
+    bb = (bb * a) / 255;
+    DWORD pix = (a << 24) | (rr << 16) | (gg << 8) | bb;
+
+    DWORD* p = (DWORD*)bits;
+    for (int y = ry; y < ry + rh; y++) {
+        if (y < 0 || y >= H) continue;
+        for (int x = rx; x < rx + rw; x++) {
+            if (x < 0 || x >= W) continue;
+            bool inside = true;
+            if (radius > 0) {
+                int dx = 0, dy = 0;
+                if (x < rx + radius && y < ry + radius) { dx = x - (rx + radius); dy = y - (ry + radius); }
+                else if (x >= rx + rw - radius && y < ry + radius) { dx = x - (rx + rw - radius - 1); dy = y - (ry + radius); }
+                else if (x < rx + radius && y >= ry + rh - radius) { dx = x - (rx + radius); dy = y - (ry + rh - radius - 1); }
+                else if (x >= rx + rw - radius && y >= ry + rh - radius) { dx = x - (rx + rw - radius - 1); dy = y - (ry + rh - radius - 1); }
+                
+                if (dx != 0 || dy != 0) {
+                    float dist = std::sqrt((float)(dx*dx + dy*dy));
+                    if (dist > radius) {
+                        float alphaMult = std::max(0.0f, radius + 1.0f - dist);
+                        if (alphaMult <= 0.0f) inside = false;
+                        else {
+                            BYTE aa = (BYTE)((a * alphaMult));
+                            BYTE pr = (rr * aa) / a;
+                            BYTE pg = (gg * aa) / a;
+                            BYTE pb = (bb * aa) / a;
+                            // Simple blend over 0 background
+                            DWORD curr = p[y * W + x];
+                            if (curr == 0) {
+                                p[y * W + x] = (aa << 24) | (pr << 16) | (pg << 8) | pb;
+                            } else {
+                                // Full alpha blend not implemented here for edges over other elements,
+                                // but we draw background first so it's fine!
+                                p[y * W + x] = (aa << 24) | (pr << 16) | (pg << 8) | pb;
+                            }
+                            continue;
+                        }
+                    }
+                }
+            }
+            if (inside) p[y * W + x] = pix;
+        }
+    }
+}
 
 static void PaintWidget(HWND hwnd) {
     RECT cr;
@@ -920,17 +973,26 @@ static void PaintWidget(HWND hwnd) {
 
     HDC hdc = GetDC(hwnd);
     HDC mem = CreateCompatibleDC(hdc);
-    HBITMAP bmp = CreateCompatibleBitmap(hdc, W, H);
+    BITMAPINFO bmi = {0};
+    bmi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+    bmi.bmiHeader.biWidth = W;
+    bmi.bmiHeader.biHeight = -H; // top-down
+    bmi.bmiHeader.biPlanes = 1;
+    bmi.bmiHeader.biBitCount = 32;
+    bmi.bmiHeader.biCompression = BI_RGB;
+    void* bits;
+    HBITMAP bmp = CreateDIBSection(hdc, &bmi, DIB_RGB_COLORS, &bits, NULL, 0);
     HBITMAP oldBmp = (HBITMAP)SelectObject(mem, bmp);
 
-    // Background
-    COLORREF bgCol = g_settings.transparent ? TRANSPARENT_KEY_COLOR : g_settings.bgColor;
-    HBRUSH bgBrush = CreateSolidBrush(bgCol);
-    FillRect(mem, &cr, bgBrush);
-    DeleteObject(bgBrush);
+    if (g_settings.transparent) {
+        memset(bits, 0, W * H * 4);
+    } else {
+        FillRoundRectAlpha(bits, W, H, 0, 0, W, H, 0, g_settings.bgColor, 255);
+    }
 
     SetBkMode(mem, TRANSPARENT);
     HFONT oldFont = (HFONT)SelectObject(mem, g_fontBold);
+    HTHEME hTheme = OpenThemeData(hwnd, L"WINDOW");
 
     auto it = std::remove_if(g_hitRects.begin(), g_hitRects.end(), [hwnd](const HitRect& hr) { return hr.hwnd == hwnd; });
     g_hitRects.erase(it, g_hitRects.end());
@@ -981,41 +1043,52 @@ static void PaintWidget(HWND hwnd) {
         for (size_t wi = 0; wi < allWs.size(); wi++) {
             const WorkspaceInfo* ws = allWs[wi];
 
-            // Separator
-            if (wi > 0) {
-                HPEN pen = CreatePen(PS_SOLID, 1, g_settings.inactiveColor);
-                HPEN oldPen = (HPEN)SelectObject(mem, pen);
-                MoveToEx(mem, x + sepPad, 4, nullptr);
-                LineTo(mem, x + sepPad, H - 4);
-                SelectObject(mem, oldPen);
-                DeleteObject(pen);
-                x += 1 + sepPad * 2;
-            }
-
             // Workspace number label
             std::wstring nameW = Utf8ToWide(ws->name);
             SelectObject(mem, g_fontBold);
-
             SIZE numSize;
             GetTextExtentPoint32W(mem, nameW.c_str(), (int)nameW.size(), &numSize);
-            int numW = numSize.cx + 8; // padding
-            int numH = numSize.cy;
-            int numY = (H - numH) / 2;
+            int gap = ws->windows.empty() ? 8 : 16;
+            int numW = numSize.cx + gap;
+            int numY = (H - numSize.cy) / 2;
 
-            // Active highlight background
-            if (ws->focused) {
-                RECT hlRect = { x, 2, x + numW, H - 2 };
-                HBRUSH hlBrush = CreateSolidBrush(g_settings.activeColor);
-                FillRect(mem, &hlRect, hlBrush);
-                DeleteObject(hlBrush);
+            int itemWidth = 0;
+            int iconsWidth = 0;
+            for (auto& win : ws->windows) {
+                iconsWidth += iconSize + 4;
+                if (!g_settings.iconsOnly && !win.process.empty()) {
+                    std::string display = win.title.empty() ? win.process : win.title;
+                    for (auto& suffix : {" - Google Chrome", " - Chrome", " \xe2\x80\x94 Mozilla Firefox", " - Microsoft Edge", " - Notepad", " - Visual Studio Code"}) {
+                        size_t pos = display.rfind(suffix);
+                        if (pos != std::string::npos && pos + strlen(suffix) == display.size()) { display = display.substr(0, pos); break; }
+                    }
+                    if (display.size() > 12) display = display.substr(0, 12);
+                    std::wstring dispW = Utf8ToWide(display);
+                    SIZE ts; GetTextExtentPoint32W(mem, dispW.c_str(), (int)dispW.size(), &ts);
+                    iconsWidth += ts.cx + 4;
+                }
+            }
+            itemWidth = numW + iconsWidth;
+            int startX = x + 4;
+
+            // Hover highlight
+            if (g_hoveredWs == ws->name) {
+                FillRoundRectAlpha(bits, W, H, startX, 2, itemWidth, H - 4, 4, RGB(255, 255, 255), 25);
             }
 
-            COLORREF numCol = (ws->hasWindows || ws->focused) ? g_settings.textColor : g_settings.inactiveColor;
-            SetTextColor(mem, numCol);
-
+            // Draw number
             auto drawNumber = [&](int drawX) {
-                TextOutW(mem, drawX + 4, numY, nameW.c_str(), (int)nameW.size());
-                HitRect hr;
+                COLORREF numCol = (ws->hasWindows || ws->focused) ? g_settings.textColor : g_settings.inactiveColor;
+                if (hTheme) {
+                    DTTOPTS opts = {sizeof(DTTOPTS)};
+                    opts.dwFlags = DTT_COMPOSITED | DTT_TEXTCOLOR;
+                    opts.crText = numCol;
+                    RECT tr = { drawX + 4, numY, drawX + 4 + numW, numY + numSize.cy };
+                    DrawThemeTextEx(hTheme, mem, 0, 0, nameW.c_str(), (int)nameW.size(), DT_LEFT | DT_TOP | DT_SINGLELINE, &tr, &opts);
+                } else {
+                    SetTextColor(mem, numCol);
+                    TextOutW(mem, drawX + 4, numY, nameW.c_str(), (int)nameW.size());
+                }                HitRect hr;
                 hr.rect = { drawX, 0, drawX + numW, H };
                 hr.type = HitRect::WORKSPACE;
                 hr.hwnd = hwnd;
@@ -1033,7 +1106,6 @@ static void PaintWidget(HWND hwnd) {
                     if (icon) {
                         DrawIconEx(mem, ix, iconY, icon, iconSize, iconSize, 0, nullptr, DI_NORMAL);
                     } else {
-                        // Fallback: draw a small gray circle with first letter
                         HBRUSH fb = CreateSolidBrush(RGB(80, 80, 80));
                         RECT fbR = { ix + 1, iconY + 1, ix + iconSize - 1, iconY + iconSize - 1 };
                         HRGN rgn = CreateEllipticRgnIndirect(&fbR);
@@ -1042,15 +1114,23 @@ static void PaintWidget(HWND hwnd) {
                         DeleteObject(fb);
                         std::wstring letter = win.process.empty() ? L"?" : Utf8ToWide(win.process.substr(0, 1));
                         for (auto& c : letter) c = towupper(c);
-                        SetTextColor(mem, g_settings.textColor);
                         SelectObject(mem, g_fontSmall);
-                        TextOutW(mem, ix + 3, iconY + 1, letter.c_str(), 1);
+                        if (hTheme) {
+                            DTTOPTS opts = {sizeof(DTTOPTS)};
+                            opts.dwFlags = DTT_COMPOSITED | DTT_TEXTCOLOR;
+                            opts.crText = g_settings.textColor;
+                            RECT tr = { ix + 3, iconY + 1, ix + 3 + 10, iconY + 1 + 10 };
+                            DrawThemeTextEx(hTheme, mem, 0, 0, letter.c_str(), 1, DT_LEFT | DT_TOP | DT_SINGLELINE, &tr, &opts);
+                        } else {
+                            SetTextColor(mem, g_settings.textColor);
+                            TextOutW(mem, ix + 3, iconY + 1, letter.c_str(), 1);
+                        }
                         SelectObject(mem, g_fontBold);
                     }
 
                     // Hit rect for this window
                     HitRect hr;
-                    hr.rect = { ix, 0, ix + iconSize + 2, H };
+                    hr.rect = { ix, 0, ix + iconSize + 4, H };
                     hr.type = HitRect::WINDOW;
                     hr.hwnd = hwnd;
                     hr.target = win.id;
@@ -1059,15 +1139,12 @@ static void PaintWidget(HWND hwnd) {
                     hr.windowState = win.state;
                     g_hitRects.push_back(hr);
 
-                    ix += iconSize + 2;
+                    ix += iconSize + 4;
 
                     if (!g_settings.iconsOnly && !win.process.empty()) {
-                        // Short text label
                         SelectObject(mem, g_fontSmall);
                         std::string display = win.title.empty() ? win.process : win.title;
-                        // Strip common suffixes
-                        for (auto& suffix : {" - Google Chrome", " - Chrome", " \xe2\x80\x94 Mozilla Firefox",
-                                             " - Microsoft Edge", " - Notepad", " - Visual Studio Code"}) {
+                        for (auto& suffix : {" - Google Chrome", " - Chrome", " \xe2\x80\x94 Mozilla Firefox", " - Microsoft Edge", " - Notepad", " - Visual Studio Code"}) {
                             size_t pos = display.rfind(suffix);
                             if (pos != std::string::npos && pos + strlen(suffix) == display.size()) {
                                 display = display.substr(0, pos);
@@ -1076,10 +1153,18 @@ static void PaintWidget(HWND hwnd) {
                         }
                         if (display.size() > 12) display = display.substr(0, 12);
                         std::wstring dispW = Utf8ToWide(display);
-                        SetTextColor(mem, g_settings.textColor);
-                        TextOutW(mem, ix, (H - 10) / 2, dispW.c_str(), (int)dispW.size());
-                        SIZE ts;
-                        GetTextExtentPoint32W(mem, dispW.c_str(), (int)dispW.size(), &ts);
+                        SIZE ts; GetTextExtentPoint32W(mem, dispW.c_str(), (int)dispW.size(), &ts);
+                          if (hTheme) {
+                            DTTOPTS opts = {sizeof(DTTOPTS)};
+                            opts.dwFlags = DTT_COMPOSITED | DTT_TEXTCOLOR;
+                            opts.crText = g_settings.textColor;
+                            RECT tr = { ix, (H - 10) / 2, ix + ts.cx, (H - 10) / 2 + ts.cy };
+                            DrawThemeTextEx(hTheme, mem, 0, 0, dispW.c_str(), (int)dispW.size(), DT_LEFT | DT_TOP | DT_SINGLELINE, &tr, &opts);
+                        } else {
+                            SetTextColor(mem, g_settings.textColor);
+                            TextOutW(mem, ix, (H - 10) / 2, dispW.c_str(), (int)dispW.size());
+                        }
+
                         ix += ts.cx + 4;
                         SelectObject(mem, g_fontBold);
                     }
@@ -1087,25 +1172,66 @@ static void PaintWidget(HWND hwnd) {
                 return ix;
             };
 
+            /* int startX = x + 4; */
+            int endX = startX;
+
             if (g_settings.labelLeft) {
-                drawNumber(x);
-                x += numW;
-                x = drawIcons(x);
+                drawNumber(endX);
+                if (!ws->windows.empty()) {
+                    FillRoundRectAlpha(bits, W, H, endX + 4 + numSize.cx + 5, (H - 12) / 2, 1, 12, 0, g_settings.textColor, 80);
+                }
+                endX += numW;
+                endX = drawIcons(endX);
             } else {
-                int iconStart = x;
-                x = drawIcons(x);
-                drawNumber(x);
-                x += numW;
+                endX = drawIcons(endX);
+                if (!ws->windows.empty()) {
+                    FillRoundRectAlpha(bits, W, H, endX + 4, (H - 12) / 2, 1, 12, 0, g_settings.textColor, 80);
+                    endX += 8; // Extra padding for the divider
+                }
+                drawNumber(endX);
+                endX += numW;
             }
+
+            itemWidth = endX - startX;
+
+            // Fluent Design Indicator Pill
+            if (ws->focused || ws->hasWindows) {
+                int pillW = ws->focused ? 16 : 6;
+                int pillH = 3;
+                int pillX = startX + (itemWidth - pillW) / 2;
+                int pillY = H - pillH - 1; // 1px from bottom
+
+                COLORREF pillCol = ws->focused ? g_settings.activeColor : RGB(150, 150, 150);
+                
+                HBRUSH pillBrush = CreateSolidBrush(pillCol);
+                HPEN pillPen = CreatePen(PS_SOLID, 1, pillCol);
+                HGDIOBJ oldBrush = SelectObject(mem, pillBrush);
+                HGDIOBJ oldPen = SelectObject(mem, pillPen);
+                
+                RoundRect(mem, pillX, pillY, pillX + pillW, pillY + pillH, 3, 3);
+                
+                SelectObject(mem, oldBrush);
+                SelectObject(mem, oldPen);
+                DeleteObject(pillBrush);
+                DeleteObject(pillPen);
+            }
+
+            x = endX + 4; // Right padding for workspace item
         }
 
         // Finalize: resize window to fit content
-        int totalWidth = x + 6;
+        int totalWidth = x;
         PositionWidget(hwnd, totalWidth);
     }
 
 done:
-    BitBlt(hdc, 0, 0, W, H, mem, 0, 0, SRCCOPY);
+    if (hTheme) CloseThemeData(hTheme);
+
+    POINT ptSrc = {0, 0};
+    SIZE size = {W, H};
+    BLENDFUNCTION blend = {AC_SRC_OVER, 0, 255, AC_SRC_ALPHA};
+    UpdateLayeredWindow(hwnd, hdc, nullptr, &size, mem, &ptSrc, 0, &blend, ULW_ALPHA);
+
     SelectObject(mem, oldFont);
     SelectObject(mem, oldBmp);
     DeleteObject(bmp);
@@ -1196,6 +1322,35 @@ static LRESULT CALLBACK WidgetWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM
     case WM_CREATE:
         SetTimer(hwnd, TIMER_FULLSCREEN, 1000, nullptr);
         return 0;
+
+    case WM_MOUSEMOVE: {
+        TRACKMOUSEEVENT tme = { sizeof(TRACKMOUSEEVENT), TME_LEAVE, hwnd, 0 };
+        TrackMouseEvent(&tme);
+        
+        int mx = (short)LOWORD(lParam), my = (short)HIWORD(lParam);
+        POINT pt = { mx, my };
+        std::string newHover = "";
+        for (auto& hr : g_hitRects) {
+            if (hr.hwnd != hwnd) continue;
+            if (PtInRect(&hr.rect, pt)) {
+                newHover = hr.wsName;
+                break;
+            }
+        }
+        if (newHover != g_hoveredWs) {
+            g_hoveredWs = newHover;
+            InvalidateRect(hwnd, nullptr, FALSE);
+        }
+        return 0;
+    }
+    
+    case WM_MOUSELEAVE: {
+        if (!g_hoveredWs.empty()) {
+            g_hoveredWs = "";
+            InvalidateRect(hwnd, nullptr, FALSE);
+        }
+        return 0;
+    }
 
     case WM_PAINT: {
         PAINTSTRUCT ps;
@@ -1336,11 +1491,7 @@ static void UIThreadProc() {
                                      WS_POPUP, 0, 0, 300, 32,
                                      nullptr, nullptr, GetModuleHandle(nullptr), nullptr);
             if (widget) {
-                if (g_settings.transparent) {
-                    SetLayeredWindowAttributes(widget, TRANSPARENT_KEY_COLOR, 0, LWA_COLORKEY);
-                } else {
-                    SetLayeredWindowAttributes(widget, 0, 255, LWA_ALPHA);
-                }
+
                 
                 SetWindowLongPtrW(widget, GWLP_HWNDPARENT, (LONG_PTR)hwnd);
                 PositionWidget(widget, 300);
@@ -1532,11 +1683,7 @@ void Wh_ModSettingsChanged() {
 
     // Update transparency mode
     for (auto w : g_widgets) {
-        if (g_settings.transparent) {
-            SetLayeredWindowAttributes(w, TRANSPARENT_KEY_COLOR, 0, LWA_COLORKEY);
-        } else {
-            SetLayeredWindowAttributes(w, 0, 255, LWA_ALPHA);
-        }
+
         InvalidateRect(w, nullptr, TRUE);
     }
 
