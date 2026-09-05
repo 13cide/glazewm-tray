@@ -1088,15 +1088,7 @@ static void PaintWidget(HWND hwnd) {
                 } else {
                     SetTextColor(mem, numCol);
                     TextOutW(mem, drawX + 4, numY, nameW.c_str(), (int)nameW.size());
-                }                HitRect hr;
-                hr.rect = { drawX, 0, drawX + numW, H };
-                hr.type = HitRect::WORKSPACE;
-                hr.hwnd = hwnd;
-                hr.target = ws->name;
-                hr.wsName = ws->name;
-                hr.windowFocused = false;
-                hr.windowState = "";
-                g_hitRects.push_back(hr);
+                }
             };
 
             auto drawIcons = [&](int startX) -> int {
@@ -1128,17 +1120,7 @@ static void PaintWidget(HWND hwnd) {
                         SelectObject(mem, g_fontBold);
                     }
 
-                    // Hit rect for this window
-                    HitRect hr;
-                    hr.rect = { ix, 0, ix + iconSize + 4, H };
-                    hr.type = HitRect::WINDOW;
-                    hr.hwnd = hwnd;
-                    hr.target = win.id;
-                    hr.wsName = ws->name;
-                    hr.windowFocused = win.hasFocus;
-                    hr.windowState = win.state;
-                    g_hitRects.push_back(hr);
-
+                    int startIx = ix;
                     ix += iconSize + 4;
 
                     if (!g_settings.iconsOnly && !win.process.empty()) {
@@ -1168,6 +1150,17 @@ static void PaintWidget(HWND hwnd) {
                         ix += ts.cx + 4;
                         SelectObject(mem, g_fontBold);
                     }
+
+                    // Hit rect for this window (icon + optional text)
+                    HitRect hr;
+                    hr.rect = { startIx, 0, ix, H };
+                    hr.type = HitRect::WINDOW;
+                    hr.hwnd = hwnd;
+                    hr.target = win.id;
+                    hr.wsName = ws->name;
+                    hr.windowFocused = win.hasFocus;
+                    hr.windowState = win.state;
+                    g_hitRects.push_back(hr);
                 }
                 return ix;
             };
@@ -1216,18 +1209,19 @@ static void PaintWidget(HWND hwnd) {
 
                 COLORREF pillCol = ws->focused ? g_settings.activeColor : RGB(150, 150, 150);
                 
-                HBRUSH pillBrush = CreateSolidBrush(pillCol);
-                HPEN pillPen = CreatePen(PS_SOLID, 1, pillCol);
-                HGDIOBJ oldBrush = SelectObject(mem, pillBrush);
-                HGDIOBJ oldPen = SelectObject(mem, pillPen);
-                
-                RoundRect(mem, pillX, pillY, pillX + pillW, pillY + pillH, 3, 3);
-                
-                SelectObject(mem, oldBrush);
-                SelectObject(mem, oldPen);
-                DeleteObject(pillBrush);
-                DeleteObject(pillPen);
+                FillRoundRectAlpha(bits, W, H, pillX, pillY, pillW, pillH, 1, pillCol, 255);
             }
+
+            // Hit rect for entire workspace bounds (tiles perfectly with x and endX + 4)
+            HitRect hr;
+            hr.rect = { x, 0, endX + 4, H };
+            hr.type = HitRect::WORKSPACE;
+            hr.hwnd = hwnd;
+            hr.target = ws->name;
+            hr.wsName = ws->name;
+            hr.windowFocused = false;
+            hr.windowState = "";
+            g_hitRects.push_back(hr);
 
             x = endX + 4; // Right padding for workspace item
         }
